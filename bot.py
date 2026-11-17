@@ -1,11 +1,24 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import random
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from collections import Counter
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
 
 from predict import analizar_texto
 
-# ─── Configuración ──────────────────────────────────────
+
+# ─── CONFIGURACIÓN ──────────────────────────────────────
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -15,9 +28,204 @@ if not TOKEN:
     print("   En PowerShell: $env:TELEGRAM_TOKEN='tu_token_aqui'")
     exit(1)
 
-# ─── Datos ──────────────────────────────────────────────
 
-# INTERPRETACIONES: Qué significa el mensaje que te enviaron
+# ─── MENÚ PRINCIPAL ─────────────────────────────────────
+
+async def enviar_menu(message):
+    """Envía el menú principal. Funciona tanto desde /start como desde un botón."""
+    teclado = [
+        [
+            InlineKeyboardButton("💬 Analizar mensaje", callback_data="analizar"),
+            InlineKeyboardButton("📊 Mi resumen", callback_data="resumen")
+        ],
+        [
+            InlineKeyboardButton("🧠 Detectar patrones", callback_data="patrones")
+        ],
+        [
+            InlineKeyboardButton("🧮 Calculadora", callback_data="calculadora")
+        ],
+        [
+            InlineKeyboardButton("🔄 Reiniciar análisis", callback_data="reiniciar")
+        ],
+        [
+            InlineKeyboardButton("❓ Cómo funciona", callback_data="ayuda")
+        ]
+    ]
+
+    mensaje = (
+        "👋 ¡Bienvenido, soy tu detective personal!\n\n"
+        "Puedo analizar tus conversaciones, identificar emociones "
+        "y detectar patrones de comunicación.\n\n"
+        "También puedo hacer operaciones numéricas con la calculadora.\n\n"
+        "Selecciona una opción:"
+    )
+
+    await message.reply_text(
+        mensaje,
+        reply_markup=InlineKeyboardMarkup(teclado)
+    )
+
+
+async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await enviar_menu(update.message)
+
+
+# ─── CALCULADORA ────────────────────────────────────────
+
+OPERADORES = {
+    "sumar": "+",
+    "restar": "-",
+    "multiplicar": "×",
+    "dividir": "÷",
+}
+
+
+async def mostrar_calculadora(query):
+    teclado = [
+        [
+            InlineKeyboardButton("➕ Sumar", callback_data="sumar"),
+            InlineKeyboardButton("➖ Restar", callback_data="restar")
+        ],
+        [
+            InlineKeyboardButton("✖️ Multiplicar", callback_data="multiplicar"),
+            InlineKeyboardButton("➗ Dividir", callback_data="dividir")
+        ],
+        [
+            InlineKeyboardButton("🔙 Volver al menú", callback_data="menu")
+        ]
+    ]
+
+    await query.message.reply_text(
+        "🧮 CALCULADORA\n\nSelecciona la operación:",
+        reply_markup=InlineKeyboardMarkup(teclado)
+    )
+
+
+async def manejar_calculadora(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    opcion = query.data
+
+    if opcion == "calculadora":
+        await mostrar_calculadora(query)
+        return
+
+    if opcion in OPERADORES:
+        context.user_data["operacion"] = opcion
+        context.user_data["esperando_numeros"] = True
+
+        await query.message.reply_text(
+            f"Seleccionaste: {opcion.upper()}\n\n"
+            "Envíame los dos números separados por un espacio.\n\n"
+            "Ejemplo: 20 5"
+        )
+
+
+async def procesar_calculadora(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Devuelve True si el mensaje fue manejado por la calculadora."""
+    if not context.user_data.get("esperando_numeros"):
+        return False
+
+    texto = update.message.text.strip()
+    operacion = context.user_data.get("operacion")
+
+    # Validar entrada
+    try:
+        partes = texto.replace(",", ".").split()
+
+        if len(partes) != 2:
+            raise ValueError
+
+        num1, num2 = map(float, partes)
+
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Ingresa exactamente dos números.\n"
+            "Ejemplo: 15 3"
+        )
+        return True  # sigue esperando números
+
+    # Calcular
+    if operacion == "sumar":
+        resultado = num1 + num2
+    elif operacion == "restar":
+        resultado = num1 - num2
+    elif operacion == "multiplicar":
+        resultado = num1 * num2
+    elif operacion == "dividir":
+        if num2 == 0:
+            await update.message.reply_text(
+                "❌ No se puede dividir entre cero.\n"
+                "Envíame otros dos números."
+            )
+            return True  # sigue esperando números
+        resultado = num1 / num2
+    else:
+        context.user_data.pop("esperando_numeros", None)
+        context.user_data.pop("operacion", None)
+        return False
+
+    await update.message.reply_text(
+        f"🧮 RESULTADO\n\n"
+        f"Operación: {num1:g} {OPERADORES[operacion]} {num2:g}\n"
+        f"Resultado: {resultado:g}"
+    )
+
+    # Limpiar estado de la calculadora
+    context.user_data.pop("esperando_numeros", None)
+    context.user_data.pop("operacion", None)
+
+    return True
+
+
+# ─── BOTONES DEL MENÚ ───────────────────────────────────
+
+async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    opcion = query.data
+
+    if opcion == "analizar":
+        # Cancelar la calculadora si estaba activa
+        context.user_data.pop("esperando_numeros", None)
+        context.user_data.pop("operacion", None)
+        context.user_data["esperando_mensaje"] = True
+        await query.message.reply_text(
+            "💬 Envíame el mensaje que quieres analizar."
+        )
+
+    elif opcion in ("resumen", "patrones"):
+        historial = context.user_data.get("historial", [])
+        await query.message.reply_text(
+            generar_resumen(historial),
+            parse_mode="Markdown"
+        )
+
+    elif opcion == "reiniciar":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "🔄 Tu historial de análisis ha sido reiniciado."
+        )
+
+    elif opcion == "ayuda":
+        await query.message.reply_text(
+            "Analizo emociones, intenciones, discurso de odio "
+            "y señales de distanciamiento en los mensajes.\n\n"
+            "También tengo una calculadora para sumar, restar, "
+            "multiplicar y dividir."
+        )
+
+    elif opcion == "menu":
+        # Cancelar la calculadora si estaba activa
+        context.user_data.pop("esperando_numeros", None)
+        context.user_data.pop("operacion", None)
+        await enviar_menu(query.message)
+
+
+# ─── INTERPRETACIONES ───────────────────────────────────
+
 INTERPRETACIONES = {
     "reclamo": [
         "📢 La persona se siente ignorada y reclama tu atención.",
@@ -81,7 +289,9 @@ INTERPRETACIONES = {
     ],
 }
 
-# SUGERENCIAS: Cómo responder al mensaje (para TI)
+
+# ─── SUGERENCIAS ────────────────────────────────────────
+
 SUGERENCIAS = {
     "reclamo": [
         "🗣️ Responde: 'Entiendo que te sientes ignorado, no fue mi intención. Hablemos.'",
@@ -145,6 +355,9 @@ SUGERENCIAS = {
     ],
 }
 
+
+# ─── EMOJIS ─────────────────────────────────────────────
+
 EMOJIS = {
     "reclamo": "😔",
     "celos": "😒",
@@ -170,68 +383,369 @@ EMOJIS_EMOCION = {
     "neutral": "😐",
 }
 
-# ─── Funciones auxiliares ───────────────────────────────
+
+# ─── CONFIGURACIÓN DE MEMORIA ───────────────────────────
+
+MAX_HISTORIAL = 30
+
+EMOCIONES_NEGATIVAS = {
+    "tristeza",
+    "enojo",
+    "miedo",
+    "disgusto"
+}
+
+
+# ─── FUNCIONES AUXILIARES ───────────────────────────────
 
 def construir_barra(valor: int) -> str:
-    bloques = valor // 10
+    bloques = max(0, min(10, valor // 10))
     return "█" * bloques + "░" * (10 - bloques)
+
 
 def obtener_texto(diccionario, clave, default="normal"):
     return random.choice(diccionario.get(clave, diccionario[default]))
+
 
 def formatear_respuesta(datos: dict) -> str:
     return (
         f"{datos['emoji_principal']} *Análisis del mensaje que te enviaron*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{datos['emoji_emocion']} *Emoción detectada:* {datos['emocion']}\n"
-        f"🚩 *Toxicidad:* {datos['toxicidad']}\n"
+        f"🚩 *Discurso de odio:* {datos['toxicidad']}\n"
         f"🧠 *Intención:* {datos['intencion']}\n"
-        f"💔 *Ghosting:* {datos['ghosting_bar']} {datos['ghosting']}%\n"
+        f"📉 *Señales de distanciamiento:* {datos['ghosting_bar']} {datos['ghosting']}%\n"
         f"🔥 *Riesgo:* {datos['riesgo']}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💡 *Qué significa:*\n{datos['interpretacion']}\n\n"
         f"💬 *Cómo responder:*\n{datos['sugerencia']}"
     )
 
-# ─── Handler principal ──────────────────────────────────
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─── MEMORIA INTELIGENTE ─────────────────────────────────
+
+def guardar_en_historial(context, texto, datos):
+
+    historial = context.user_data.setdefault("historial", [])
+
+    historial.append({
+        "texto": texto,
+        "emocion": datos["emocion"].lower(),
+        "intencion": datos["intencion"].lower(),
+        "toxicidad": datos["toxicidad"],
+        "riesgo": datos["riesgo"]
+    })
+
+    if len(historial) > MAX_HISTORIAL:
+        del historial[:-MAX_HISTORIAL]
+
+
+# ─── DETECTOR DE PATRONES ───────────────────────────────
+
+def analizar_patrones(historial):
+
+    if not historial:
+        return "Todavía no hay suficientes mensajes para analizar."
+
+    total = len(historial)
+
+    emociones = Counter(
+        mensaje["emocion"] for mensaje in historial
+    )
+
+    intenciones = Counter(
+        mensaje["intencion"] for mensaje in historial
+    )
+
+    mensajes_toxicos = sum(
+        1 for mensaje in historial
+        if mensaje["toxicidad"] == "🔴 Alta"
+    )
+
+    mensajes_negativos = sum(
+        1 for mensaje in historial
+        if mensaje["emocion"] in EMOCIONES_NEGATIVAS
+    )
+
+    resultados = []
+
+    # Emoción predominante
+    emocion_principal, cantidad = emociones.most_common(1)[0]
+
+    resultados.append(
+        f"🧠 Emoción predominante: {emocion_principal.capitalize()} "
+        f"({cantidad}/{total} mensajes)"
+    )
+
+    # Intención predominante
+    intencion_principal, frecuencia = intenciones.most_common(1)[0]
+
+    resultados.append(
+        f"🎯 Intención más detectada: {intencion_principal.capitalize()} "
+        f"({frecuencia} veces)"
+    )
+
+    # Toxicidad
+    porcentaje_toxicidad = round(
+        (mensajes_toxicos / total) * 100
+    )
+
+    resultados.append(
+        f"🚩 Mensajes con toxicidad alta: {porcentaje_toxicidad}%"
+    )
+
+    # Emociones negativas
+    porcentaje_negativo = round(
+        (mensajes_negativos / total) * 100
+    )
+
+    resultados.append(
+        f"📉 Mensajes con emociones negativas: {porcentaje_negativo}%"
+    )
+
+    # Patrones repetidos
+    if frecuencia >= 3:
+        resultados.append(
+            f"🔁 Patrón repetido: se detectó {intencion_principal} "
+            f"en {frecuencia} ocasiones."
+        )
+
+    if porcentaje_toxicidad >= 40:
+        resultados.append(
+            "⚠️ Hay una frecuencia importante de mensajes "
+            "clasificados con toxicidad alta."
+        )
+
+    if porcentaje_negativo >= 60:
+        resultados.append(
+            "💔 Predominan las emociones negativas en el historial."
+        )
+
+    # Evolución emocional
+    if total >= 4:
+
+        mitad = total // 2
+
+        primeros = historial[:mitad]
+        ultimos = historial[mitad:]
+
+        negativos_inicio = sum(
+            1 for mensaje in primeros
+            if mensaje["emocion"] in EMOCIONES_NEGATIVAS
+        )
+
+        negativos_final = sum(
+            1 for mensaje in ultimos
+            if mensaje["emocion"] in EMOCIONES_NEGATIVAS
+        )
+
+        if negativos_final > negativos_inicio:
+            resultados.append(
+                "📈 La segunda mitad de la conversación presenta "
+                "más emociones negativas."
+            )
+
+        elif negativos_final < negativos_inicio:
+            resultados.append(
+                "📉 La segunda mitad presenta menos emociones negativas."
+            )
+
+        else:
+            resultados.append(
+                "➖ La presencia de emociones negativas se mantiene estable."
+            )
+
+    return "\n".join(resultados)
+
+
+# ─── GENERAR RESUMEN ────────────────────────────────────
+
+def generar_resumen(historial):
+
+    total = len(historial)
+
+    if total == 0:
+        return "📭 Todavía no tienes mensajes guardados."
+
+    patrones = analizar_patrones(historial)
+
+    return (
+        "🕵️ *DETECTIVE DE CONVERSACIONES*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📩 Mensajes analizados: {total}\n\n"
+        "*📊 Patrones detectados:*\n"
+        f"{patrones}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 Estos resultados son orientativos y dependen "
+        "de los mensajes analizados."
+    )
+
+
+# ─── HANDLER PRINCIPAL ──────────────────────────────────
+
+async def responder(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     try:
+
+        # Si la calculadora está esperando números, la maneja ella
+        if await procesar_calculadora(update, context):
+            return
+
         texto = update.message.text
-        
-        emocion, toxicidad, ghosting, riesgo, intencion, confianza = analizar_texto(texto)
-        
+        context.user_data.pop("esperando_mensaje", None)
+
+        emocion, toxicidad, ghosting, riesgo, intencion, confianza = (
+            analizar_texto(texto)
+        )
+
         datos = {
             "emoji_principal": EMOJIS.get(intencion, "💬"),
             "emoji_emocion": EMOJIS_EMOCION.get(emocion, "😐"),
             "emocion": emocion.capitalize(),
-            "toxicidad": "🔴 Alta" if toxicidad == "si" else "🟢 Baja",
+            "toxicidad": (
+                "🔴 Alta" if toxicidad == "si" else "🟢 Baja"
+            ),
             "intencion": intencion.capitalize(),
             "ghosting": ghosting,
             "ghosting_bar": construir_barra(ghosting),
             "riesgo": riesgo,
-            "interpretacion": obtener_texto(INTERPRETACIONES, intencion),
-            "sugerencia": obtener_texto(SUGERENCIAS, intencion),
+            "interpretacion": obtener_texto(
+                INTERPRETACIONES,
+                intencion
+            ),
+            "sugerencia": obtener_texto(
+                SUGERENCIAS,
+                intencion
+            ),
         }
-        
-        respuesta = formatear_respuesta(datos)
-        await update.message.reply_text(respuesta, parse_mode="Markdown")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        await update.message.reply_text("⚠️ Ocurrió un error al procesar el mensaje.")
 
-# ─── Inicialización ─────────────────────────────────────
+        # Guardar mensaje
+        guardar_en_historial(
+            context,
+            texto,
+            datos
+        )
+
+        respuesta = formatear_respuesta(datos)
+
+        historial = context.user_data.get("historial", [])
+
+        # Comparación con el mensaje anterior
+        if len(historial) >= 2:
+
+            emocion_anterior = historial[-2]["emocion"]
+            emocion_actual = historial[-1]["emocion"]
+
+            if emocion_anterior != emocion_actual:
+
+                respuesta += (
+                    "\n\n🔄 *Cambio emocional detectado:*\n"
+                    f"La emoción cambió de {emocion_anterior} "
+                    f"a {emocion_actual}."
+                )
+
+        # Activación del detective
+        if len(historial) >= 5:
+
+            respuesta += (
+                "\n\n🕵️ *Detective:* Ya tengo suficiente historial "
+                "para comenzar a detectar patrones. "
+                "Escribe /resumen para verlos."
+            )
+
+        await update.message.reply_text(
+            respuesta,
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+
+        print(f"❌ Error: {e}")
+
+        await update.message.reply_text(
+            "⚠️ Ocurrió un error al procesar el mensaje."
+        )
+
+
+# ─── COMANDO RESUMEN ────────────────────────────────────
+
+async def comando_resumen(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    historial = context.user_data.get("historial", [])
+
+    respuesta = generar_resumen(historial)
+
+    await update.message.reply_text(
+        respuesta,
+        parse_mode="Markdown"
+    )
+
+
+# ─── COMANDO REINICIAR ──────────────────────────────────
+
+async def comando_reiniciar(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    context.user_data["historial"] = []
+
+    await update.message.reply_text(
+        "🧹 *Memoria reiniciada correctamente.*\n\n"
+        "He borrado el historial de esta conversación. "
+        "Puedes comenzar un nuevo análisis.",
+        parse_mode="Markdown"
+    )
+
+
+# ─── INICIALIZACIÓN ─────────────────────────────────────
 
 def main():
+
     print("🤖 Bot de análisis de mensajes activo...")
-    print("📌 Analizo los mensajes que TE ENVÍAN y te digo cómo responder")
-    
+    print("📌 Analizo los mensajes que TE ENVÍAN.")
+    print("🧠 Memoria inteligente activada.")
+    print("📊 Comandos disponibles: /resumen y /reiniciar")
+
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    
-    print("🟢 Bot corriendo... Esperando mensajes")
+
+    # Comandos
+    app.add_handler(CommandHandler("start", mostrar_menu))
+    app.add_handler(CommandHandler("resumen", comando_resumen))
+    app.add_handler(CommandHandler("reiniciar", comando_reiniciar))
+
+    # Botones: cada handler solo recibe SUS callbacks gracias al pattern
+    app.add_handler(
+        CallbackQueryHandler(
+            manejar_calculadora,
+            pattern="^(calculadora|sumar|restar|multiplicar|dividir)$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            manejar_botones,
+            pattern="^(analizar|resumen|patrones|reiniciar|ayuda|menu)$"
+        )
+    )
+
+    # Mensajes de texto (calculadora + análisis)
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            responder
+        )
+    )
+
+    print("🟢 Bot corriendo... Esperando mensajes.")
+
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
